@@ -33,6 +33,8 @@ public class Dumper {
 
     private final LogView logView;
 
+    private String customSuPath;
+
     private HashMap<String, String> listMapsData;
 
     private HashMap<Integer, List<MemoryInfo>> listBinData;
@@ -41,6 +43,22 @@ public class Dumper {
         this.memoryFragment = memoryFragment;
         this.context = context;
         this.logView = logView;
+        this.customSuPath = null;
+    }
+
+    public Dumper(MemoryFragment memoryFragment, Context context, LogView logView, String customSuPath) {
+        this.memoryFragment = memoryFragment;
+        this.context = context;
+        this.logView = logView;
+        this.customSuPath = customSuPath;
+    }
+
+    private boolean isCustomSu() {
+        return customSuPath != null && !customSuPath.isEmpty();
+    }
+
+    private ShellUtil.ShellResult suExec(String command) {
+        return ShellUtil.run(customSuPath, command);
     }
 
     private void sendMessage() {
@@ -199,30 +217,26 @@ public class Dumper {
      */
     private boolean dumpMemory(String outputFile, int pid, long startAddress, long sizeMemory, boolean isCHMOD, StringBuilder outputShell) {
 
-        Shell.Result cmd = Shell.cmd("dd if=/proc/" + pid + "/mem of=" + outputFile + " bs=1024 count=" + (sizeMemory / 1024) + " skip=" + (startAddress / 1024)).exec();
-
-        if(!cmd.isSuccess()) {
-
-            if(outputShell != null)
-            {
-                for(String log : cmd.getOut())
-                {
-                    outputShell.append(log).append("\n");
-                }
-            }
-
-            return false;
+        boolean ok;
+        if (isCustomSu()) {
+            ShellUtil.ShellResult r = suExec("dd if=/proc/" + pid + "/mem of=" + outputFile + " bs=1024 count=" + (sizeMemory / 1024) + " skip=" + (startAddress / 1024));
+            ok = r.isSuccess();
+            if (!ok && outputShell != null) for (String s : r.out) outputShell.append(s).append("\n");
+        } else {
+            Shell.Result cmd = Shell.cmd("dd if=/proc/" + pid + "/mem of=" + outputFile + " bs=1024 count=" + (sizeMemory / 1024) + " skip=" + (startAddress / 1024)).exec();
+            ok = cmd.isSuccess();
+            if (!ok && outputShell != null) for (String log : cmd.getOut()) outputShell.append(log).append("\n");
         }
+
+        if(!ok) return false;
 
         if(isCHMOD)
         {
-            cmd = Shell.cmd("chmod 777 " + outputFile).exec();
-            if(outputShell != null)
-            {
-                for(String log : cmd.getOut())
-                {
-                    outputShell.append(log).append("\n");
-                }
+            if (isCustomSu()) {
+                suExec("chmod 777 " + outputFile);
+            } else {
+                Shell.Result cmd = Shell.cmd("chmod 777 " + outputFile).exec();
+                if(outputShell != null) for(String log : cmd.getOut()) outputShell.append(log).append("\n");
             }
         }
         return true;
@@ -237,12 +251,11 @@ public class Dumper {
     private void dumpMapFile(String data, String filename, String outputDirectory) {
         try
         {
-            SuFile file = new SuFile(outputDirectory + "/" + filename);
+            java.io.File file = new java.io.File(outputDirectory + "/" + filename);
+            java.io.File parent = file.getParentFile();
+            if (parent != null) parent.mkdirs();
 
-            // File output streams
-            OutputStream fileOutputStream = SuFileOutputStream.open(file);
-
-            // Create output streams
+            OutputStream fileOutputStream = new java.io.FileOutputStream(file);
             BufferedOutputStream bufferedOutputStream = new BufferedOutputStream(fileOutputStream);
             bufferedOutputStream.write(data.getBytes());
             bufferedOutputStream.close();
@@ -278,30 +291,31 @@ public class Dumper {
             {
                 fixerPath = context.getApplicationInfo().nativeLibraryDir + "/SoFixer64";
             }
-            SuFile soFixerPath = new SuFile(fixerPath);
 
             String pathDumpFixed = pathDumpFile.replace(".so", "-fixed.so");
 
-            String commandBuilder = soFixerPath.getAbsolutePath() + " -s " + pathDumpFile + " -o " + pathDumpFixed + " -m " + " 0x" + Long.toHexString(startAddress);
+            String commandBuilder = fixerPath + " -s " + pathDumpFile + " -o " + pathDumpFixed + " -m 0x" + Long.toHexString(startAddress);
 
-            Shell.Result cmd = Shell.cmd(commandBuilder).exec();
-
-            if(cmd.isSuccess())
-            {
-                SuFile dumpFile = new SuFile(pathDumpFixed);
-                if(dumpFile.exists())
-                {
-                    logView.appendInfo("Fixed Dumped File: " + dumpFile.getAbsolutePath());
+            if (isCustomSu()) {
+                ShellUtil.ShellResult r = suExec(commandBuilder);
+                if (r.isSuccess()) {
+                    java.io.File df = new java.io.File(pathDumpFixed);
+                    if (df.exists()) logView.appendInfo("Fixed Dumped File: " + df.getAbsolutePath());
+                } else {
+                    logView.appendError("ELF Fixer failed:");
+                    logView.appendLine(r.isSuccess() + "");
+                }
+            } else {
+                Shell.Result cmd = Shell.cmd(commandBuilder).exec();
+                if(cmd.isSuccess()) {
+                    com.topjohnwu.superuser.io.SuFile dumpFile = new com.topjohnwu.superuser.io.SuFile(pathDumpFixed);
+                    if(dumpFile.exists()) logView.appendInfo("Fixed Dumped File: " + dumpFile.getAbsolutePath());
+                } else {
+                    logView.appendError("ELF Fixer failed:");
+                    logView.appendLine(getOutputShell(cmd.getOut()));
                 }
             }
-            else
-            {
-                logView.appendError("ELF Fixer failed:");
-
-                logView.appendLine(getOutputShell(cmd.getOut()));
-
-                logView.appendLine();
-            }
+            logView.appendLine();
         }
     }
 
@@ -319,11 +333,11 @@ public class Dumper {
 
             for (String lib : libs) {
 
-                SuFile outputFile = new SuFile(nativeLibraryDir, lib);
+                java.io.File outputFile = new java.io.File(nativeLibraryDir, lib);
 
                 InputStream inputStream = context.getAssets().open("SoFixer/" + lib);
 
-                OutputStream outputStream = SuFileOutputStream.open(outputFile);
+                OutputStream outputStream = new java.io.FileOutputStream(outputFile);
 
                 byte[] buffer = new byte[1024];
                 int length;
@@ -335,14 +349,14 @@ public class Dumper {
                 inputStream.close();
 
                 if(outputFile.exists()) {
-
-                    Shell.Result cmd = Shell.cmd("chmod 777 " + outputFile.getAbsolutePath()).exec();
-
-                    if(cmd.isSuccess()) {
+                    if (isCustomSu()) {
+                        suExec("chmod 777 " + outputFile.getAbsolutePath());
                         result = true;
-
-                        Log.d("Dumper", lib + " extracted to " + outputFile.getAbsolutePath());
+                    } else {
+                        Shell.Result cmd = Shell.cmd("chmod 777 " + outputFile.getAbsolutePath()).exec();
+                        if(cmd.isSuccess()) result = true;
                     }
+                    Log.d("Dumper", lib + " extracted to " + outputFile.getAbsolutePath());
                 }
                 else {
                     logView.appendError("Failed to create SoFixer files: " + lib);
@@ -395,12 +409,22 @@ public class Dumper {
 
             StringBuilder mapsString = new StringBuilder();
 
-            Shell.Result cmd = Shell.cmd("cat /proc/" + getPID + "/maps").exec();
-            if(cmd.isSuccess()) {
+            List<String> output;
+            boolean success;
+
+            if (isCustomSu()) {
+                ShellUtil.ShellResult r = suExec("cat /proc/" + getPID + "/maps");
+                success = r.isSuccess();
+                output = r.out;
+            } else {
+                Shell.Result cmd = Shell.cmd("cat /proc/" + getPID + "/maps").exec();
+                success = cmd.isSuccess();
+                output = cmd.getOut();
+            }
+
+            if(success) {
 
                 List<MapInfo> createListMaps = new ArrayList<>();
-
-                List<String> output = cmd.getOut();
 
                 for (int i = 0; i < (output.size() - 5); i++) {
 
@@ -447,53 +471,33 @@ public class Dumper {
 
         HashMap<Integer, Integer> CreateListProcess = new HashMap<>();
 
-        Shell.Result cmd = Shell.cmd("ps -t | grep \"" + processName + "\"").exec();
-        if(cmd.isSuccess())
-        {
-            List<String> output = cmd.getOut();
-
-            for (int i = 0; i < output.size(); i++) {
-
-                String[] results = output.get(i).trim().replaceAll("( )+", ",").replaceAll("(\n)+", ",").split(",");
-
-                for (int j = 0; j < results.length; j++) {
-
-                    String getPackageName = results[results.length - 1];
-
-                    if(getPackageName.contains(".") && getPackageName.contains(processName))
-                    {
-                        int pid = Integer.parseInt(results[1]);
-
-                        CreateListProcess.put(pid, pid);
-                    }
-                }
+        if (isCustomSu()) {
+            String[] cmds = {"ps -A", "ps -t", "ps"};
+            for (String c : cmds) {
+                ShellUtil.ShellResult r = suExec(c + " | grep \"" + processName + "\"");
+                if (r.isSuccess()) parsePSOutput(r.out, processName, CreateListProcess);
             }
-        }
+        } else {
+            Shell.Result cmd = Shell.cmd("ps -t | grep \"" + processName + "\"").exec();
+            if(cmd.isSuccess()) parsePSOutput(cmd.getOut(), processName, CreateListProcess);
 
-        cmd = Shell.cmd("ps | grep \"" + processName + "\"").exec();
-        if(cmd.isSuccess())
-        {
-            List<String> output = cmd.getOut();
-
-            for (int i = 0; i < output.size(); i++) {
-
-                String[] results = output.get(i).trim().replaceAll("( )+", ",").replaceAll("(\n)+", ",").split(",");
-
-                for (int j = 0; j < results.length; j++) {
-
-                    String getPackageName = results[results.length - 1];
-
-                    if(getPackageName.contains(".") && getPackageName.contains(processName))
-                    {
-                        int pid = Integer.parseInt(results[1]);
-
-                        CreateListProcess.put(pid, pid);
-                    }
-                }
-            }
+            cmd = Shell.cmd("ps | grep \"" + processName + "\"").exec();
+            if(cmd.isSuccess()) parsePSOutput(cmd.getOut(), processName, CreateListProcess);
         }
 
         return new ArrayList<>(CreateListProcess.keySet());
+    }
+
+    private void parsePSOutput(List<String> output, String processName, HashMap<Integer, Integer> map) {
+        for (String line : output) {
+            String[] results = line.trim().replaceAll("( )+", ",").replaceAll("(\n)+", ",").split(",");
+            for (int j = 0; j < results.length; j++) {
+                String pkg = results[results.length - 1];
+                if(pkg.contains(".") && pkg.contains(processName)) {
+                    try { int pid = Integer.parseInt(results[1]); map.put(pid, pid); } catch (Exception ignored) {}
+                }
+            }
+        }
     }
 
     private List<Integer> getPIDProcess(String processName) {
@@ -556,8 +560,11 @@ public class Dumper {
      * @param path a path of directory.
      */
     private boolean CreateDirectory(String path) {
-        SuFile directory = new SuFile(path);
-
+        if (isCustomSu()) {
+            suExec("mkdir -p " + path);
+            return true;
+        }
+        com.topjohnwu.superuser.io.SuFile directory = new com.topjohnwu.superuser.io.SuFile(path);
         return directory.mkdirs();
     }
 }

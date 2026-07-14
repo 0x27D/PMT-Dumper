@@ -30,6 +30,7 @@ import java.util.List;
 
 import platinmods.com.dumper.BuildConfig;
 import platinmods.com.dumper.Core.Dumper;
+import platinmods.com.dumper.Core.ShellUtil;
 import platinmods.com.dumper.R;
 import platinmods.com.dumper.variable.LogView;
 import platinmods.com.dumper.variable.ProcessInfo;
@@ -43,11 +44,11 @@ public class MemoryFragment extends Fragment implements OptionDialog.SaveListene
     // Main Field Code
     MemoryFragment Instance;
 
-    TextInputEditText process_edit_text, fileName_edit_text, dump_path_edit_text;
+    TextInputEditText process_edit_text, fileName_edit_text, dump_path_edit_text, su_path_edit_text;
 
-    Button button_selectProcess, button_dump, button_option;
+    Button button_selectProcess, button_dump, button_option, button_check_root;
 
-    TextView textStatus;
+    TextView textStatus, root_status_text;
 
     SharedPreferences sharedPreferences;
 
@@ -88,11 +89,14 @@ public class MemoryFragment extends Fragment implements OptionDialog.SaveListene
         process_edit_text = view.findViewById(R.id.process_edit_text);
         fileName_edit_text = view.findViewById(R.id.fileName_edit_text);
         dump_path_edit_text = view.findViewById(R.id.dump_path_edit_text);
+        su_path_edit_text = view.findViewById(R.id.su_path_edit_text);
 
         button_selectProcess = view.findViewById(R.id.button_selectProcess);
         button_dump = view.findViewById(R.id.button_dump);
         button_option = view.findViewById(R.id.button_option);
+        button_check_root = view.findViewById(R.id.button_check_root);
         textStatus = view.findViewById(R.id.textStatus);
+        root_status_text = view.findViewById(R.id.root_status_text);
 
         button_option.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -130,19 +134,61 @@ public class MemoryFragment extends Fragment implements OptionDialog.SaveListene
             }
         });
 
-
+        button_check_root.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                checkCustomRoot();
+            }
+        });
 
         process_edit_text.setText("");
 
-        // Load Preferences for Dump Path
+        // Load Preferences
         String outputDirectory = loadValueString("DumpPath", Environment.getExternalStorageDirectory().getPath());
-
         dump_path_edit_text.setText(outputDirectory);
+
+        String savedSuPath = loadValueString("SuPath", "/boot/android/android/system/xbin/bstk/su");
+        su_path_edit_text.setText(savedSuPath);
     }
 
     /**
      * A method to Start Dumping and the code will run in the background.
      */
+    private String getCustomSuPath() {
+        String path = su_path_edit_text.getText().toString().trim();
+        if (path.isEmpty()) return null;
+        writeValue("SuPath", path);
+        return path;
+    }
+
+    private void checkCustomRoot() {
+        String suPath = getCustomSuPath();
+        if (suPath == null) {
+            Toast.makeText(getContext(), "Enter SU binary path first!", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        root_status_text.setText("Checking...");
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                Looper.prepare();
+                final String detail = ShellUtil.checkRootDetail(suPath);
+                final boolean granted = ShellUtil.checkRoot(suPath);
+                getActivity().runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        root_status_text.setText(granted ? "CUSTOM SU: GRANTED" : "CUSTOM SU: DENIED");
+                        root_status_text.setTextColor(granted ?
+                                getResources().getColor(android.R.color.holo_green_dark) :
+                                getResources().getColor(android.R.color.holo_red_dark));
+                        sendMessage(detail + "\n\n");
+                    }
+                });
+                Looper.loop();
+            }
+        }).start();
+    }
+
     private void StartDump() {
 
         String processName = process_edit_text.getText().toString();
@@ -181,7 +227,14 @@ public class MemoryFragment extends Fragment implements OptionDialog.SaveListene
 
                     logView.appendLine("================================================\n");
 
-                    Dumper dumper = new Dumper(Instance, getContext(), logView);
+                    String suPath = getCustomSuPath();
+                    Dumper dumper;
+                    if (suPath != null && ShellUtil.checkRoot(suPath)) {
+                        dumper = new Dumper(Instance, getContext(), logView, suPath);
+                        logView.appendLine("[INFO] Using custom SU: " + suPath + "\n");
+                    } else {
+                        dumper = new Dumper(Instance, getContext(), logView);
+                    }
 
                     dumper.startDump(processName, fileName, outputDirectory, isDumpMaps, isSoFixer, is64Bit, isDumpMetadata);
 
@@ -243,7 +296,11 @@ public class MemoryFragment extends Fragment implements OptionDialog.SaveListene
      */
     private void loadDefaultMessage() {
 
-        String rootPermission = Boolean.TRUE.equals(Shell.isAppGrantedRoot()) ? "Enabled" : "Disabled";
+        String suPath = getCustomSuPath();
+        boolean hasCustomRoot = suPath != null && ShellUtil.checkRoot(suPath);
+        boolean hasLibsuRoot = Boolean.TRUE.equals(Shell.isAppGrantedRoot());
+
+        String rootPermission = hasCustomRoot ? "Enabled (Custom SU)" : (hasLibsuRoot ? "Enabled (libsu)" : "Disabled");
 
         String StoragePermission = StoragePermission() ? "Enabled" : "Disabled";
 
@@ -254,6 +311,8 @@ public class MemoryFragment extends Fragment implements OptionDialog.SaveListene
         defaultMessage.append("Storage Permission: ").append(StoragePermission).append("\n\n");
 
         defaultMessage.append("Output Directory: " + getOutputDirectory()).append("\n\n");
+
+        defaultMessage.append("SU Path: " + (suPath != null ? suPath : "(libsu default)")).append("\n\n");
     }
 
     /**
@@ -514,15 +573,17 @@ public class MemoryFragment extends Fragment implements OptionDialog.SaveListene
     private boolean AllPermissionGranted() {
         if(!StoragePermission()) {
             Toast.makeText(getContext(), "Please Grant Storage Permission first!", Toast.LENGTH_SHORT).show();
+            return false;
         }
 
-        if(!Shell.isAppGrantedRoot()) {
-            Toast.makeText(getContext(), "Please Grant Root Permission first!", Toast.LENGTH_SHORT).show();
+        String suPath = getCustomSuPath();
+        boolean hasRoot = (suPath != null && ShellUtil.checkRoot(suPath)) || Boolean.TRUE.equals(Shell.isAppGrantedRoot());
+
+        if(!hasRoot) {
+            Toast.makeText(getContext(), "No root access! Check SU path or grant root via Magisk/SuperSU.", Toast.LENGTH_LONG).show();
+            return false;
         }
-        if(StoragePermission() && Shell.isAppGrantedRoot()) {
-            return true;
-        }
-        return false;
+        return true;
     }
 
     /**

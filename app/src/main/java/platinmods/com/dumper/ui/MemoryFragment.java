@@ -455,6 +455,22 @@ public class MemoryFragment extends Fragment implements OptionDialog.SaveListene
     /**
      * A method to Create List Process of Running Applications.
      */
+    private List<String> shellExec(String... commands) {
+        String suPath = getCustomSuPath();
+        if (suPath != null && ShellUtil.checkRoot(suPath)) {
+            for (String cmd : commands) {
+                ShellUtil.ShellResult r = ShellUtil.run(suPath, cmd);
+                if (r.isSuccess() && !r.out.isEmpty()) return r.out;
+            }
+            return new ArrayList<>();
+        }
+        for (String cmd : commands) {
+            Shell.Result r = Shell.cmd(cmd).exec();
+            if (r.isSuccess() && !r.getOut().isEmpty()) return r.getOut();
+        }
+        return new ArrayList<>();
+    }
+
     private HashMap<Integer, ProcessInfo> CreateListProcess() {
 
         List<String> listApps;
@@ -471,23 +487,19 @@ public class MemoryFragment extends Fragment implements OptionDialog.SaveListene
 
         HashMap<Integer, ProcessInfo> MakeListProcess = new HashMap<>();
 
-        Shell.Result cmd = Shell.cmd("ps -t").exec();
+        List<String> psOut = shellExec("ps -A", "ps -t", "ps");
+        for (String line : psOut) {
+            String[] results = line.trim().replaceAll("( )+", ",").replaceAll("(\n)+", ",").split(",");
+            for (int j = 0; j < results.length; j++) {
 
-        if(cmd.isSuccess())
-        {
-            List<String> output = cmd.getOut();
-            for (int i = 0; i < output.size(); i++) {
-                String[] results = output.get(i).trim().replaceAll("( )+", ",").replaceAll("(\n)+", ",").split(",");
-                for (int j = 0; j < results.length; j++) {
-
-                    String processName = results[results.length - 1];
-                    if(processName.contains(".") && !processName.contains(BuildConfig.APPLICATION_ID))
-                    {
+                String processName = results[results.length - 1];
+                if(processName.contains(".") && !processName.contains(BuildConfig.APPLICATION_ID))
+                {
+                    try {
                         int pid = Integer.parseInt(results[1]);
 
                         if (isShowAllProcess)
                         {
-                            // Device is running Android 11 or higher
                             MakeListProcess.put(pid, new ProcessInfo(getContext(), processName, pid));
                         }
                         else
@@ -497,37 +509,7 @@ public class MemoryFragment extends Fragment implements OptionDialog.SaveListene
                                 MakeListProcess.put(pid, new ProcessInfo(getContext(), processName, pid));
                             }
                         }
-                    }
-                }
-            }
-        }
-
-        cmd = Shell.cmd("ps").exec();
-        if(cmd.isSuccess())
-        {
-            List<String> output = cmd.getOut();
-            for (int i = 0; i < output.size(); i++) {
-                String[] results = output.get(i).trim().replaceAll("( )+", ",").replaceAll("(\n)+", ",").split(",");
-                for (int j = 0; j < results.length; j++) {
-
-                    String processName = results[results.length - 1];
-                    if(processName.contains(".") && !processName.contains(BuildConfig.APPLICATION_ID))
-                    {
-                        int pid = Integer.parseInt(results[1]);
-
-                        if (isShowAllProcess)
-                        {
-                            // Device is running Android 11 or higher
-                            MakeListProcess.put(pid, new ProcessInfo(getContext(), processName, pid));
-                        }
-                        else
-                        {
-                            if(isInstalledApps(listApps, processName))
-                            {
-                                MakeListProcess.put(pid, new ProcessInfo(getContext(), processName, pid));
-                            }
-                        }
-                    }
+                    } catch (Exception ignored) {}
                 }
             }
         }
